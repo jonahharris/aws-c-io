@@ -25,6 +25,7 @@
 #include <socket_handler_test.c>
 #include <tls_handler_test.c>
 #include <alpn_handler_test.c>
+#include <http_handler_test.c>
 
 static int run_tests(int argc, char *argv[]) {
     AWS_RUN_TEST_CASES(&xthread_scheduled_tasks_execute,
@@ -52,7 +53,8 @@ static int run_tests(int argc, char *argv[]) {
                        /*&tls_channel_negotiation_error,*/
                        &alpn_successfully_negotiates,
                        &alpn_no_protocol_message,
-                       &alpn_error_creating_handler
+                       &alpn_error_creating_handler,
+                       &http_stuff
     );
 }
 
