@@ -27,6 +27,10 @@ option(BUILD_RELOCATABLE_BINARIES
         "Build Relocatable Binaries, this will turn off features that will fail on older kernels than used for the build."
         OFF)
 
+option(USE_LIBUV "Use libuv event loop instead of kqueue/epoll/iocp directly" OFF)
+# Disable this if you'll be linking against an executable that includes UV, like Node.js
+option(UV_LINK_LIBRARY "Link against the libuv.a library found by find_library (NOTE: if this is set to OFF, your executable will need to manually link against libuv)" ON)
+
 file(GLOB AWS_IO_HEADERS
         "include/aws/io/*.h"
         )
@@ -48,12 +52,38 @@ file(GLOB AWS_IO_SRC
         "source/*.c"
         )
 
+if (MSVC)
+    source_group("Header Files\\aws\\io" FILES ${AWS_IO_HEADERS})
+    source_group("Header Files\\aws\\io\\private" FILES ${AWS_IO_PRIV_HEADERS})
+    source_group("Source Files" FILES ${AWS_IO_SRC})
+endif ()
+
+if (USE_LIBUV)
+    if (UV_LINK_LIBRARY)
+        # Prefer static version if available
+        find_library(LIBUV_LIBRARY NAMES uv_a uv)
+        set(PLATFORM_LIBS ${LIBUV_LIBRARY})
+    endif ()
+
+    file(GLOB AWS_IO_OS_SRC
+            "source/libuv/*.c"
+        )
+
+    set(EVENT_LOOP_DEFINE "LIBUV")
+
+    if (MSVC)
+        source_group("Source Files\\libuv" FILES ${AWS_IO_OS_SRC})
+    endif ()
+endif()
+
 if (WIN32)
-    option(USE_IO_COMPLETION_PORTS
+    if (NOT USE_LIBUV)
+        option(USE_IO_COMPLETION_PORTS
             "Use I/O Completion Ports to drive event-loops. \
             If disabled, a less performant implementation based on select() is used. \
             Disable this if implementing your own event-loop whose interface does not match the IOCP interface."
             ON)
+    endif()
 
     file(GLOB AWS_IO_OS_HEADERS
             )
@@ -62,25 +92,28 @@ if (WIN32)
             "source/windows/*.c"
             )
 
-    if (USE_IO_COMPLETION_PORTS)
+    if (MSVC)
+        source_group("Source Files\\windows" FILES ${AWS_IO_OS_SRC})
+    endif()
+
+    if (NOT USE_LIBUV AND USE_IO_COMPLETION_PORTS)
         file(GLOB AWS_IO_IOCP_SRC
+                ${AWS_IO_OS_SRC}
                 "source/windows/iocp/*.c"
                 )
          list(APPEND AWS_IO_OS_SRC ${AWS_IO_IOCP_SRC})
 
          set(EVENT_LOOP_DEFINE "IO_COMPLETION_PORTS")
+
+        if (MSVC)
+            source_group("Source Files\\windows\\iocp" FILES ${AWS_IO_IOCP_SRC})
+        endif ()
     endif ()
 
-    if (MSVC)
-        source_group("Header Files\\aws\\io" FILES ${AWS_IO_HEADERS})
-        source_group("Header Files\\aws\\io\\private" FILES ${AWS_IO_PRIV_HEADERS})
-        source_group("Source Files" FILES ${AWS_IO_SRC})
-        source_group("Source Files\\windows" FILES ${AWS_IO_OS_SRC})
-    endif ()
     #platform libs come from aws-c-common transitively, so we don't specify them here, but for documentation purposes,
     #Kernel32 and wsock2 are pulled in automatically. Here we add the lib containing the schannel API.
     #Also note, you don't get a choice on TLS implementation for Windows.
-    set(PLATFORM_LIBS Secur32 Crypt32 Shlwapi)
+    set(PLATFORM_LIBS ${PLATFORM_LIBS} Secur32 Crypt32 Shlwapi)
     set(TLS_STACK_DETERMINED ON)
 
 elseif (CMAKE_SYSTEM_NAME STREQUAL "Linux")
@@ -88,12 +121,15 @@ elseif (CMAKE_SYSTEM_NAME STREQUAL "Linux")
             )
 
     file(GLOB AWS_IO_OS_SRC
+            ${AWS_IO_OS_SRC}
             "source/linux/*.c"
             "source/posix/*.c"
             )
     set(PLATFORM_LIBS "")
 
-    set(EVENT_LOOP_DEFINE "EPOLL")
+    if (NOT USE_LIBUV)
+        set(EVENT_LOOP_DEFINE "EPOLL")
+    endif()
 
 elseif (APPLE)
 
@@ -101,6 +137,7 @@ elseif (APPLE)
             )
 
     file(GLOB AWS_IO_OS_SRC
+            ${AWS_IO_OS_SRC}
             "source/bsd/*.c"
             "source/posix/*.c"
             "source/darwin/*.c"
@@ -112,40 +149,27 @@ elseif (APPLE)
     endif ()
 
     #No choice on TLS for apple, darwinssl will always be used.
-    set(PLATFORM_LIBS ${SECURITY_LIB})
+    set(PLATFORM_LIBS ${PLATFORM_LIBS} ${SECURITY_LIB})
     set(TLS_STACK_DETERMINED ON)
 
-    set(EVENT_LOOP_DEFINE "KQUEUE")
+    if (NOT USE_LIBUV)
+        set(EVENT_LOOP_DEFINE "KQUEUE")
+    endif()
 
 elseif (CMAKE_SYSTEM_NAME STREQUAL "FreeBSD" OR CMAKE_SYSTEM_NAME STREQUAL "NetBSD")
     file(GLOB AWS_IO_OS_HEADERS
             )
 
     file(GLOB AWS_IO_OS_SRC
+            ${AWS_IO_OS_SRC}
             "source/bsd/*.c"
             "source/posix/*.c"
             )
-
-    set(EVENT_LOOP_DEFINE "KQUEUE")
+    if (NOT USE_LIBUV)
+        set(EVENT_LOOP_DEFINE "KQUEUE")
+    endif()
 
 endif()
-
-if (NOT USE_IO_COMPLETION_PORTS)
-    # LIBUV event_loop not supported under IOCP
-    option(USE_LIBUV "Use libuv event loop instead of kqueue/epoll" OFF)
-    # Disable this if you'll be linking against an executable that includes UV, like Node.js
-    option(UV_LINK_LIBRARY "Link against the libuv.a library found by find_library (NOTE: if this is set to OFF, your executable will need to manually link against libuv)" ON)
-else ()
-    set(USE_LIBUV OFF)
-endif ()
-
-if (USE_LIBUV)
-    list(APPEND AWS_IO_OS_SRC "source/libuv/uv_event_loop.c")
-    if (UV_LINK_LIBRARY)
-        # Prefer static version if available
-        find_library(LIBUV_LIBRARY NAMES uv_a uv)
-    endif ()
-endif ()
 
 if (NOT CUSTOM_TLS)
     if (USE_S2N)
@@ -192,12 +216,7 @@ target_compile_definitions(${CMAKE_PROJECT_NAME} PUBLIC "-DAWS_USE_${EVENT_LOOP_
 
 if (USE_LIBUV)
     target_compile_definitions(${CMAKE_PROJECT_NAME} PUBLIC AWS_USE_LIBUV)
-
-    if (UV_LINK_LIBRARY)
-        target_link_libraries(${CMAKE_PROJECT_NAME} PUBLIC ${LIBUV_LIBRARY})
-    endif ()
-
-    # Allow specific overriding of uv.h location
+      # Allow specific overriding of uv.h location
     if (UV_HEADER_PATH)
         message(STATUS "Using uv.h location: ${UV_HEADER_PATH}")
         target_include_directories(${CMAKE_PROJECT_NAME} BEFORE PUBLIC ${UV_HEADER_PATH})
